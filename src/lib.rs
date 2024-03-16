@@ -41,14 +41,18 @@ where
 pub struct JwtAuthenticationLayer<Claim, F> {
     /// User provided function to get the public key from
     public_key_fn: F,
+    /// A valid issuer for the token
+    issuer: String,
     _phantom: PhantomData<Claim>,
 }
 
 impl<Claim, F: PublicKeyFn> JwtAuthenticationLayer<Claim, F> {
     /// Create a new layer to validate JWT tokens with the given public key
-    pub fn new(public_key_fn: F) -> Self {
+    /// Tokens will only be accepted if the issuer matches the given issuer
+    pub fn new(issuer: &str, public_key_fn: F) -> Self {
         Self {
             public_key_fn,
+            issuer: issuer.to_string(),
             _phantom: PhantomData,
         }
     }
@@ -61,6 +65,7 @@ impl<S, Claim, F: PublicKeyFn> Layer<S> for JwtAuthenticationLayer<Claim, F> {
         JwtAuthentication {
             inner,
             public_key_fn: self.public_key_fn.clone(),
+            issuer: self.issuer.clone(),
             _phantom: self._phantom,
         }
     }
@@ -71,6 +76,7 @@ impl<S, Claim, F: PublicKeyFn> Layer<S> for JwtAuthenticationLayer<Claim, F> {
 pub struct JwtAuthentication<S, Claim, F> {
     inner: S,
     public_key_fn: F,
+    issuer: String,
     _phantom: PhantomData<Claim>,
 }
 
@@ -98,6 +104,7 @@ pub enum JwtAuthenticationFuture<
         request: Request<Body>,
         #[pin]
         public_key_future: AsyncTraitFuture<Result<Vec<u8>, PubKeyFn::Error>>,
+        issuer: String,
         service: TService,
         _phantom: PhantomData<Claim>,
     },
@@ -125,6 +132,7 @@ where
             JwtAuthenticationFutureProj::HasTokenWaitingForPublicKey {
                 bearer,
                 public_key_future,
+                issuer,
                 ..
             } => {
                 match public_key_future.poll(cx) {
@@ -142,8 +150,11 @@ where
                         Poll::Ready(Ok(response))
                     }
                     Poll::Ready(Ok(public_key)) => {
-                        let claim_result =
-                            RequestClaim::<Claim>::from_token(bearer.token().trim(), &public_key);
+                        let claim_result = RequestClaim::<Claim>::from_token(
+                            bearer.token().trim(),
+                            &issuer,
+                            &public_key,
+                        );
                         match claim_result {
                             Err(code) => {
                                 error!(code = %code, "failed to decode JWT");
@@ -210,6 +221,7 @@ where
                     bearer,
                     request: req,
                     public_key_future,
+                    issuer: self.issuer.clone(),
                     service: self.inner.clone(),
                     _phantom: self._phantom,
                 }
@@ -237,17 +249,14 @@ where
     pub token: String,
 }
 
-// TODO: replace
-const ISS: &str = "shuttle";
-
 impl<T> RequestClaim<T>
 where
     for<'de> T: Deserialize<'de>,
 {
-    pub fn from_token(token: &str, public_key: &[u8]) -> Result<Self, StatusCode> {
+    pub fn from_token(token: &str, issuer: &str, public_key: &[u8]) -> Result<Self, StatusCode> {
         let decoding_key = DecodingKey::from_ed_der(public_key);
         let mut validation = Validation::new(jsonwebtoken::Algorithm::EdDSA);
-        validation.set_issuer(&[ISS]);
+        validation.set_issuer(&[issuer]);
 
         trace!("converting token to claim");
         let claim: T = decode(token, &decoding_key, &validation)
@@ -328,7 +337,7 @@ mod tests {
             Self {
                 exp: exp.timestamp() as usize,
                 iat: iat.timestamp() as usize,
-                iss: ISS.to_string(),
+                iss: "test-issuer".to_string(),
                 nbf: iat.timestamp() as usize,
                 sub,
                 token: None,
@@ -384,10 +393,13 @@ mod tests {
                 }),
             )
             .layer(
-                ServiceBuilder::new().layer(JwtAuthenticationLayer::<Claim, _>::new(move || {
-                    let public_key = public_key.clone();
-                    async move { public_key.clone() }
-                })),
+                ServiceBuilder::new().layer(JwtAuthenticationLayer::<Claim, _>::new(
+                    "test-issuer",
+                    move || {
+                        let public_key = public_key.clone();
+                        async move { public_key.clone() }
+                    },
+                )),
             );
 
         //////////////////////////////////////////////////////////////////////////
