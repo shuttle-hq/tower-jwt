@@ -306,7 +306,7 @@ mod tests {
     };
     use serde::Serialize;
     use std::ops::Add;
-    use tower::{ServiceBuilder, ServiceExt};
+    use tower::ServiceExt;
 
     use super::*;
 
@@ -390,13 +390,10 @@ mod tests {
                     }
                 }),
             )
-            .layer(ServiceBuilder::new().layer(JwtLayer::<Claim, _>::new(
-                "test-issuer",
-                move || {
-                    let public_key = public_key.clone();
-                    async move { public_key.clone() }
-                },
-            )));
+            .layer(JwtLayer::<Claim, _>::new("test-issuer", move || {
+                let public_key = public_key.clone();
+                async move { public_key.clone() }
+            }));
 
         //////////////////////////////////////////////////////////////////////////
         // Test token missing
