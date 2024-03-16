@@ -38,7 +38,7 @@ where
 /// It can also be used with tonic. See:
 /// https://github.com/hyperium/tonic/blob/master/examples/src/tower/server.rs
 #[derive(Clone)]
-pub struct JwtAuthenticationLayer<Claim, F> {
+pub struct JwtLayer<Claim, F> {
     /// User provided function to get the public key from
     public_key_fn: F,
     /// A valid issuer for the token
@@ -46,7 +46,7 @@ pub struct JwtAuthenticationLayer<Claim, F> {
     _phantom: PhantomData<Claim>,
 }
 
-impl<Claim, F: PublicKeyFn> JwtAuthenticationLayer<Claim, F> {
+impl<Claim, F: PublicKeyFn> JwtLayer<Claim, F> {
     /// Create a new layer to validate JWT tokens with the given public key
     /// Tokens will only be accepted if the issuer matches the given issuer
     pub fn new(issuer: &str, public_key_fn: F) -> Self {
@@ -58,11 +58,11 @@ impl<Claim, F: PublicKeyFn> JwtAuthenticationLayer<Claim, F> {
     }
 }
 
-impl<S, Claim, F: PublicKeyFn> Layer<S> for JwtAuthenticationLayer<Claim, F> {
-    type Service = JwtAuthentication<S, Claim, F>;
+impl<S, Claim, F: PublicKeyFn> Layer<S> for JwtLayer<Claim, F> {
+    type Service = Jwt<S, Claim, F>;
 
     fn layer(&self, inner: S) -> Self::Service {
-        JwtAuthentication {
+        Jwt {
             inner,
             public_key_fn: self.public_key_fn.clone(),
             issuer: self.issuer.clone(),
@@ -73,7 +73,7 @@ impl<S, Claim, F: PublicKeyFn> Layer<S> for JwtAuthenticationLayer<Claim, F> {
 
 /// Middleware for validating a valid JWT token is present on "authorization: bearer <token>"
 #[derive(Clone)]
-pub struct JwtAuthentication<S, Claim, F> {
+pub struct Jwt<S, Claim, F> {
     inner: S,
     public_key_fn: F,
     issuer: String,
@@ -82,8 +82,8 @@ pub struct JwtAuthentication<S, Claim, F> {
 
 type AsyncTraitFuture<A> = Pin<Box<dyn Future<Output = A> + Send>>;
 
-#[pin_project(project = JwtAuthenticationFutureProj, project_replace = JwtAuthenticationFutureProjOwn)]
-pub enum JwtAuthenticationFuture<
+#[pin_project(project = JwtFutureProj, project_replace = JwtFutureProjOwn)]
+pub enum JwtFuture<
     PubKeyFn: PublicKeyFn,
     TService: Service<Request<Body>, Response = Response<UnsyncBoxBody<Bytes, ResponseError>>>,
     ResponseError,
@@ -111,7 +111,7 @@ pub enum JwtAuthenticationFuture<
 }
 
 impl<PubKeyFn, TService, ResponseError, Claim> Future
-    for JwtAuthenticationFuture<PubKeyFn, TService, ResponseError, Claim>
+    for JwtFuture<PubKeyFn, TService, ResponseError, Claim>
 where
     PubKeyFn: PublicKeyFn + 'static,
     TService: Service<Request<Body>, Response = Response<UnsyncBoxBody<Bytes, ResponseError>>>,
@@ -121,15 +121,15 @@ where
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         match self.as_mut().project() {
-            JwtAuthenticationFutureProj::Error => {
+            JwtFutureProj::Error => {
                 let response = Response::builder()
                     .status(StatusCode::BAD_REQUEST)
                     .body(Default::default())
                     .unwrap();
                 Poll::Ready(Ok(response))
             }
-            JwtAuthenticationFutureProj::WaitForFuture { future } => future.poll(cx),
-            JwtAuthenticationFutureProj::HasTokenWaitingForPublicKey {
+            JwtFutureProj::WaitForFuture { future } => future.poll(cx),
+            JwtFutureProj::HasTokenWaitingForPublicKey {
                 bearer,
                 public_key_future,
                 issuer,
@@ -167,16 +167,14 @@ where
                                 Poll::Ready(Ok(response))
                             }
                             Ok(claim) => {
-                                let owned = self
-                                    .as_mut()
-                                    .project_replace(JwtAuthenticationFuture::Error);
+                                let owned = self.as_mut().project_replace(JwtFuture::Error);
                                 match owned {
-                                    JwtAuthenticationFutureProjOwn::HasTokenWaitingForPublicKey {
+                                    JwtFutureProjOwn::HasTokenWaitingForPublicKey {
                                         mut request, mut service, ..
                                     } => {
                                         request.extensions_mut().insert(claim);
                                         let future = service.call(request);
-                                        self.as_mut().set(JwtAuthenticationFuture::WaitForFuture { future });
+                                        self.as_mut().set(JwtFuture::WaitForFuture { future });
                                         self.poll(cx)
                                     },
                                     _ => unreachable!("We know that we're in the 'HasTokenWaitingForPublicKey' state"),
@@ -190,7 +188,7 @@ where
     }
 }
 
-impl<S, Claim, F, ResponseError> Service<Request<Body>> for JwtAuthentication<S, Claim, F>
+impl<S, Claim, F, ResponseError> Service<Request<Body>> for Jwt<S, Claim, F>
 where
     S: Service<Request<Body>, Response = Response<UnsyncBoxBody<Bytes, ResponseError>>>
         + Send
@@ -203,7 +201,7 @@ where
 {
     type Response = S::Response;
     type Error = S::Error;
-    type Future = JwtAuthenticationFuture<F, S, ResponseError, Claim>;
+    type Future = JwtFuture<F, S, ResponseError, Claim>;
 
     fn poll_ready(
         &mut self,
@@ -392,15 +390,13 @@ mod tests {
                     }
                 }),
             )
-            .layer(
-                ServiceBuilder::new().layer(JwtAuthenticationLayer::<Claim, _>::new(
-                    "test-issuer",
-                    move || {
-                        let public_key = public_key.clone();
-                        async move { public_key.clone() }
-                    },
-                )),
-            );
+            .layer(ServiceBuilder::new().layer(JwtLayer::<Claim, _>::new(
+                "test-issuer",
+                move || {
+                    let public_key = public_key.clone();
+                    async move { public_key.clone() }
+                },
+            )));
 
         //////////////////////////////////////////////////////////////////////////
         // Test token missing
