@@ -1,15 +1,14 @@
-use std::{convert::Infallible, future::Future, ops::Add, pin::Pin, task::Poll};
+use std::{convert::Infallible, future::Future, marker::PhantomData, pin::Pin, task::Poll};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use chrono::{Duration, Utc};
 use headers::{authorization::Bearer, Authorization, HeaderMapExt};
 use http::{Request, Response, StatusCode};
 use http_body::combinators::UnsyncBoxBody;
 use hyper::Body;
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{decode, DecodingKey, Validation};
 use pin_project::pin_project;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tower::{Layer, Service};
 use tracing::{error, trace};
 
@@ -39,34 +38,40 @@ where
 /// It can also be used with tonic. See:
 /// https://github.com/hyperium/tonic/blob/master/examples/src/tower/server.rs
 #[derive(Clone)]
-pub struct JwtAuthenticationLayer<F> {
+pub struct JwtAuthenticationLayer<Claim, F> {
     /// User provided function to get the public key from
     public_key_fn: F,
+    _phantom: PhantomData<Claim>,
 }
 
-impl<F: PublicKeyFn> JwtAuthenticationLayer<F> {
+impl<Claim, F: PublicKeyFn> JwtAuthenticationLayer<Claim, F> {
     /// Create a new layer to validate JWT tokens with the given public key
     pub fn new(public_key_fn: F) -> Self {
-        Self { public_key_fn }
+        Self {
+            public_key_fn,
+            _phantom: PhantomData,
+        }
     }
 }
 
-impl<S, F: PublicKeyFn> Layer<S> for JwtAuthenticationLayer<F> {
-    type Service = JwtAuthentication<S, F>;
+impl<S, Claim, F: PublicKeyFn> Layer<S> for JwtAuthenticationLayer<Claim, F> {
+    type Service = JwtAuthentication<S, Claim, F>;
 
     fn layer(&self, inner: S) -> Self::Service {
         JwtAuthentication {
             inner,
             public_key_fn: self.public_key_fn.clone(),
+            _phantom: self._phantom,
         }
     }
 }
 
 /// Middleware for validating a valid JWT token is present on "authorization: bearer <token>"
 #[derive(Clone)]
-pub struct JwtAuthentication<S, F> {
+pub struct JwtAuthentication<S, Claim, F> {
     inner: S,
     public_key_fn: F,
+    _phantom: PhantomData<Claim>,
 }
 
 type AsyncTraitFuture<A> = Pin<Box<dyn Future<Output = A> + Send>>;
@@ -76,10 +81,12 @@ pub enum JwtAuthenticationFuture<
     PubKeyFn: PublicKeyFn,
     TService: Service<Request<Body>, Response = Response<UnsyncBoxBody<Bytes, ResponseError>>>,
     ResponseError,
+    Claim,
 > {
     // If there was an error return a BAD_REQUEST.
     Error,
 
+    // We are ready to call the inner service.
     WaitForFuture {
         #[pin]
         future: TService::Future,
@@ -92,14 +99,16 @@ pub enum JwtAuthenticationFuture<
         #[pin]
         public_key_future: AsyncTraitFuture<Result<Vec<u8>, PubKeyFn::Error>>,
         service: TService,
+        _phantom: PhantomData<Claim>,
     },
 }
 
-impl<PubKeyFn, TService, ResponseError> Future
-    for JwtAuthenticationFuture<PubKeyFn, TService, ResponseError>
+impl<PubKeyFn, TService, ResponseError, Claim> Future
+    for JwtAuthenticationFuture<PubKeyFn, TService, ResponseError, Claim>
 where
     PubKeyFn: PublicKeyFn + 'static,
     TService: Service<Request<Body>, Response = Response<UnsyncBoxBody<Bytes, ResponseError>>>,
+    for<'de> Claim: Deserialize<'de> + Send + Sync + 'static,
 {
     type Output = Result<TService::Response, TService::Error>;
 
@@ -133,7 +142,8 @@ where
                         Poll::Ready(Ok(response))
                     }
                     Poll::Ready(Ok(public_key)) => {
-                        let claim_result = Claim::from_token(bearer.token().trim(), &public_key);
+                        let claim_result =
+                            RequestClaim::<Claim>::from_token(bearer.token().trim(), &public_key);
                         match claim_result {
                             Err(code) => {
                                 error!(code = %code, "failed to decode JWT");
@@ -169,7 +179,7 @@ where
     }
 }
 
-impl<S, F, ResponseError> Service<Request<Body>> for JwtAuthentication<S, F>
+impl<S, Claim, F, ResponseError> Service<Request<Body>> for JwtAuthentication<S, Claim, F>
 where
     S: Service<Request<Body>, Response = Response<UnsyncBoxBody<Bytes, ResponseError>>>
         + Send
@@ -178,10 +188,11 @@ where
     S::Future: Send + 'static,
     F: PublicKeyFn + 'static,
     <F as PublicKeyFn>::Error: 'static,
+    for<'de> Claim: Deserialize<'de> + Send + Sync + 'static,
 {
     type Response = S::Response;
     type Error = S::Error;
-    type Future = JwtAuthenticationFuture<F, S, ResponseError>;
+    type Future = JwtAuthenticationFuture<F, S, ResponseError, Claim>;
 
     fn poll_ready(
         &mut self,
@@ -200,6 +211,7 @@ where
                     request: req,
                     public_key_future,
                     service: self.inner.clone(),
+                    _phantom: self._phantom,
                 }
             }
             Ok(None) => {
@@ -212,33 +224,33 @@ where
     }
 }
 
-#[derive(Deserialize, Clone, Serialize)]
-pub struct Claim {
-    /// Expiration time (as UTC timestamp).
-    pub exp: usize,
-    /// Issued at (as UTC timestamp).
-    iat: usize,
-    /// Issuer.
-    iss: String,
-    /// Not Before (as UTC timestamp).
-    nbf: usize,
-    /// Subject (whom token refers to).
-    pub sub: String,
+/// Used to hold the validated claim from the JWT token
+#[derive(Clone)]
+pub struct RequestClaim<T>
+where
+    for<'de> T: Deserialize<'de>,
+{
+    /// The claim from the token
+    pub claim: T,
+
     /// The original token that was parsed
-    pub token: Option<String>,
+    pub token: String,
 }
 
 // TODO: replace
 const ISS: &str = "shuttle";
 
-impl Claim {
+impl<T> RequestClaim<T>
+where
+    for<'de> T: Deserialize<'de>,
+{
     pub fn from_token(token: &str, public_key: &[u8]) -> Result<Self, StatusCode> {
         let decoding_key = DecodingKey::from_ed_der(public_key);
         let mut validation = Validation::new(jsonwebtoken::Algorithm::EdDSA);
         validation.set_issuer(&[ISS]);
 
         trace!("converting token to claim");
-        let mut claim: Self = decode(token, &decoding_key, &validation)
+        let claim: T = decode(token, &decoding_key, &validation)
             .map_err(|err| {
                 error!(
                     error = &err as &dyn std::error::Error,
@@ -268,62 +280,88 @@ impl Claim {
             })?
             .claims;
 
-        claim.token = Some(token.to_string());
-
-        Ok(claim)
-    }
-
-    /// Create a new claim for a user with the given scopes and limits.
-    pub fn new(sub: String) -> Self {
-        let iat = Utc::now();
-        let exp = iat.add(Duration::minutes(5));
-
-        Self {
-            exp: exp.timestamp() as usize,
-            iat: iat.timestamp() as usize,
-            iss: ISS.to_string(),
-            nbf: iat.timestamp() as usize,
-            sub,
-            token: None,
-        }
-    }
-
-    pub fn into_token(self, encoding_key: &EncodingKey) -> Result<String, StatusCode> {
-        if let Some(token) = self.token {
-            Ok(token)
-        } else {
-            encode(
-                &Header::new(jsonwebtoken::Algorithm::EdDSA),
-                &self,
-                encoding_key,
-            )
-            .map_err(|err| {
-                error!(
-                    error = &err as &dyn std::error::Error,
-                    "failed to convert claim to token"
-                );
-                match err.kind() {
-                    jsonwebtoken::errors::ErrorKind::Json(_) => StatusCode::INTERNAL_SERVER_ERROR,
-                    jsonwebtoken::errors::ErrorKind::Crypto(_) => StatusCode::SERVICE_UNAVAILABLE,
-                    _ => StatusCode::INTERNAL_SERVER_ERROR,
-                }
-            })
-        }
+        Ok(Self {
+            claim,
+            token: token.to_string(),
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use axum::{routing::get, Extension, Router};
+    use chrono::{Duration, Utc};
     use hyper::body;
-    use jsonwebtoken::EncodingKey;
+    use jsonwebtoken::{encode, EncodingKey, Header};
     use ring::{
         rand,
         signature::{self, Ed25519KeyPair, KeyPair},
     };
+    use serde::Serialize;
+    use std::ops::Add;
     use tower::{ServiceBuilder, ServiceExt};
 
     use super::*;
+
+    #[derive(Deserialize, Clone, Serialize)]
+    pub struct Claim {
+        /// Expiration time (as UTC timestamp).
+        pub exp: usize,
+        /// Issued at (as UTC timestamp).
+        iat: usize,
+        /// Issuer.
+        iss: String,
+        /// Not Before (as UTC timestamp).
+        nbf: usize,
+        /// Subject (whom token refers to).
+        pub sub: String,
+        /// The original token that was parsed
+        pub token: Option<String>,
+    }
+
+    impl Claim {
+        /// Create a new claim for a user with the given scopes and limits.
+        pub fn new(sub: String) -> Self {
+            let iat = Utc::now();
+            let exp = iat.add(Duration::try_minutes(5).unwrap());
+
+            Self {
+                exp: exp.timestamp() as usize,
+                iat: iat.timestamp() as usize,
+                iss: ISS.to_string(),
+                nbf: iat.timestamp() as usize,
+                sub,
+                token: None,
+            }
+        }
+
+        pub fn into_token(self, encoding_key: &EncodingKey) -> Result<String, StatusCode> {
+            if let Some(token) = self.token {
+                Ok(token)
+            } else {
+                encode(
+                    &Header::new(jsonwebtoken::Algorithm::EdDSA),
+                    &self,
+                    encoding_key,
+                )
+                .map_err(|err| {
+                    error!(
+                        error = &err as &dyn std::error::Error,
+                        "failed to convert claim to token"
+                    );
+                    match err.kind() {
+                        jsonwebtoken::errors::ErrorKind::Json(_) => {
+                            StatusCode::INTERNAL_SERVER_ERROR
+                        }
+                        jsonwebtoken::errors::ErrorKind::Crypto(_) => {
+                            StatusCode::SERVICE_UNAVAILABLE
+                        }
+                        _ => StatusCode::INTERNAL_SERVER_ERROR,
+                    }
+                })
+            }
+        }
+    }
 
     #[tokio::test]
     async fn authorization_layer() {
@@ -337,16 +375,16 @@ mod tests {
         let router = Router::new()
             .route(
                 "/",
-                get(|claim: Option<Extension<Claim>>| async move {
+                get(|claim: Option<Extension<RequestClaim<Claim>>>| async move {
                     if let Some(Extension(claim)) = claim {
-                        (StatusCode::OK, format!("Hello, {}", claim.sub))
+                        (StatusCode::OK, format!("Hello, {}", claim.claim.sub))
                     } else {
                         (StatusCode::UNAUTHORIZED, "Not authorized".to_string())
                     }
                 }),
             )
             .layer(
-                ServiceBuilder::new().layer(JwtAuthenticationLayer::new(move || {
+                ServiceBuilder::new().layer(JwtAuthenticationLayer::<Claim, _>::new(move || {
                     let public_key = public_key.clone();
                     async move { public_key.clone() }
                 })),
