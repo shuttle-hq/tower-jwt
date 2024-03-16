@@ -6,3 +6,21 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+async-trait = "0.1.77"
+bytes = { version = "1.5.0", default-features = false }
+# Tmp. To remove
+chrono = { version = "0.4.23", features = ["clock"] }
+headers = "0.3.8"
+http = "^0.2.0"
+http-body = "^0.4.0"
+hyper = "^0.14.0"
+jsonwebtoken = "9.2.0"
+pin-project = "1.1.5"
+serde = { version = "1.0.197", features = ["derive"] }
+tower = { version = "0.4.13", default-features = false }
+tracing = "0.1.40"
+
+[dev-dependencies]
+axum = "0.6.13"
+tokio = { version = "1.36.0", features = ["macros", "rt"] }
+ring = "0.17.8"
