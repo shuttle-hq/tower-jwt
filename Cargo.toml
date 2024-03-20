@@ -1,6 +1,10 @@
 [package]
 name = "tower-jwt"
+description = "Tower middleware to parse JWTs on Authorization Bearers"
 version = "0.1.0"
+license = "Apache-2.0"
+repository = "https://github.com/shuttle-hq/tower-jwt"
+documentation = "https://docs.rs/tower-jwt"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
