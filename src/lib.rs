@@ -1,11 +1,10 @@
+#![doc = include_str!("../README.md")]
+
 use std::{convert::Infallible, future::Future, marker::PhantomData, pin::Pin, task::Poll};
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use headers::{authorization::Bearer, Authorization, HeaderMapExt};
 use http::{Request, Response, StatusCode};
-use http_body::combinators::UnsyncBoxBody;
-use hyper::Body;
 use jsonwebtoken::{decode, DecodingKey, Validation};
 use pin_project::pin_project;
 use serde::Deserialize;
@@ -85,8 +84,9 @@ type AsyncTraitFuture<A> = Pin<Box<dyn Future<Output = A> + Send>>;
 #[pin_project(project = JwtFutureProj, project_replace = JwtFutureProjOwn)]
 pub enum JwtFuture<
     PubKeyFn: PublicKeyFn,
-    TService: Service<Request<Body>, Response = Response<UnsyncBoxBody<Bytes, ResponseError>>>,
-    ResponseError,
+    TService: Service<Request<ReqBody>, Response = Response<ResBody>>,
+    ReqBody,
+    ResBody,
     Claim,
 > {
     // If there was an error return a BAD_REQUEST.
@@ -101,7 +101,7 @@ pub enum JwtFuture<
     // We have a token and need to run our logic.
     HasTokenWaitingForPublicKey {
         bearer: Authorization<Bearer>,
-        request: Request<Body>,
+        request: Request<ReqBody>,
         #[pin]
         public_key_future: AsyncTraitFuture<Result<Vec<u8>, PubKeyFn::Error>>,
         issuer: String,
@@ -110,11 +110,12 @@ pub enum JwtFuture<
     },
 }
 
-impl<PubKeyFn, TService, ResponseError, Claim> Future
-    for JwtFuture<PubKeyFn, TService, ResponseError, Claim>
+impl<PubKeyFn, TService, ReqBody, ResBody, Claim> Future
+    for JwtFuture<PubKeyFn, TService, ReqBody, ResBody, Claim>
 where
     PubKeyFn: PublicKeyFn + 'static,
-    TService: Service<Request<Body>, Response = Response<UnsyncBoxBody<Bytes, ResponseError>>>,
+    TService: Service<Request<ReqBody>, Response = Response<ResBody>>,
+    ResBody: Default,
     for<'de> Claim: Deserialize<'de> + Send + Sync + 'static,
 {
     type Output = Result<TService::Response, TService::Error>;
@@ -188,20 +189,18 @@ where
     }
 }
 
-impl<S, Claim, F, ResponseError> Service<Request<Body>> for Jwt<S, Claim, F>
+impl<S, ReqBody, ResBody, Claim, F> Service<Request<ReqBody>> for Jwt<S, Claim, F>
 where
-    S: Service<Request<Body>, Response = Response<UnsyncBoxBody<Bytes, ResponseError>>>
-        + Send
-        + Clone
-        + 'static,
+    S: Service<Request<ReqBody>, Response = Response<ResBody>> + Send + Clone + 'static,
     S::Future: Send + 'static,
+    ResBody: Default,
     F: PublicKeyFn + 'static,
     <F as PublicKeyFn>::Error: 'static,
     for<'de> Claim: Deserialize<'de> + Send + Sync + 'static,
 {
     type Response = S::Response;
     type Error = S::Error;
-    type Future = JwtFuture<F, S, ResponseError, Claim>;
+    type Future = JwtFuture<F, S, ReqBody, ResBody, Claim>;
 
     fn poll_ready(
         &mut self,
@@ -210,7 +209,7 @@ where
         self.inner.poll_ready(cx)
     }
 
-    fn call(&mut self, req: Request<Body>) -> Self::Future {
+    fn call(&mut self, req: Request<ReqBody>) -> Self::Future {
         match req.headers().typed_try_get::<Authorization<Bearer>>() {
             Ok(Some(bearer)) => {
                 let public_key_fn = self.public_key_fn.clone();
@@ -235,7 +234,7 @@ where
 }
 
 /// Used to hold the validated claim from the JWT token
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct RequestClaim<T>
 where
     for<'de> T: Deserialize<'de>,
@@ -298,7 +297,7 @@ where
 mod tests {
     use axum::{routing::get, Extension, Router};
     use chrono::{Duration, Utc};
-    use hyper::body;
+    use hyper::{body, Body};
     use jsonwebtoken::{encode, EncodingKey, Header};
     use ring::{
         rand,
