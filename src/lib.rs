@@ -153,7 +153,7 @@ where
                     Poll::Ready(Ok(public_key)) => {
                         let claim_result = RequestClaim::<Claim>::from_token(
                             bearer.token().trim(),
-                            &issuer,
+                            issuer,
                             &public_key,
                         );
                         match claim_result {
