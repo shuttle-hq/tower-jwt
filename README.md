@@ -17,6 +17,7 @@ use std::convert::Infallible;
 use tower::{Service, ServiceBuilder, ServiceExt};
 use tower_jwt::{JwtLayer, RequestClaim};
 
+// Setup your claim with the fields you want to extract
 #[derive(Clone, Deserialize, Debug)]
 struct Claim {
     /// Subject (whom the token refers to)
@@ -109,6 +110,7 @@ use serde::Deserialize;
 use tower::ServiceExt;
 use tower_jwt::{JwtLayer, RequestClaim};
 
+// Setup your claim with the fields you want to extract
 #[derive(Deserialize, Clone)]
 pub struct Claim {
     /// Subject (whom token refers to).
