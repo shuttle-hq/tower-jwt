@@ -10,7 +10,7 @@ Since this is a Tower middleware it can be used on any framework like Axum, Toni
 ``` rust
 use chrono::{DateTime, Utc};
 use http::{header::AUTHORIZATION, Request, Response, StatusCode};
-use hyper::Body;
+use http_body_util::Empty;
 use jsonwebtoken::{DecodingKey, Validation};
 use serde::Deserialize;
 use std::convert::Infallible;
@@ -33,7 +33,7 @@ struct Claim {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    async fn handle(req: Request<Body>) -> Result<Response<Body>, Infallible> {
+    async fn handle(req: Request<Empty<()>>) -> Result<Response<Empty<()>>, Infallible> {
         let claim = req.extensions().get::<RequestClaim<Claim>>();
 
         if let Some(claim) = claim {
@@ -45,12 +45,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 DateTime::parse_from_rfc3339("2018-01-18T01:30:00Z").unwrap()
             );
 
-            Ok(Response::new(Body::empty()))
+            Ok(Response::new(Empty::new()))
         } else {
             // Claim was not set so this request is unauthorized
             Ok(Response::builder()
                 .status(StatusCode::UNAUTHORIZED)
-                .body(Body::empty())
+                .body(Empty::new())
                 .unwrap())
         }
     }
@@ -68,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut service = ServiceBuilder::new().layer(jwt_layer).service_fn(handle);
 
     // Call the service without a claim
-    let request = Request::builder().uri("/").body(Body::empty())?;
+    let request = Request::builder().uri("/").body(Empty::new())?;
 
     let status = service.ready().await?.call(request).await?.status();
 
@@ -82,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let request = Request::builder()
         .uri("/")
         .header(AUTHORIZATION, "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDAwfQ.CHiQ0VbodaR55aiN_0JJB7nWJBO__rt_7ur1WO-jZxg")
-        .body(Body::empty())?;
+        .body(Empty::new())?;
 
     let status = service.ready().await?.call(request).await?.status();
 
@@ -100,7 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```rust
 use axum::{routing::get, Extension, Router};
 use http::{Request, StatusCode};
-use hyper::Body;
+use http_body_util::Empty;
 use jsonwebtoken::{DecodingKey, Validation};
 use ring::{
     rand,
@@ -155,7 +155,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Call the service without a claim
     let response = router
         .clone()
-        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .oneshot(Request::builder().uri("/").body(Empty::new()).unwrap())
         .await
         .unwrap();
 

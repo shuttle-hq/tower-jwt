@@ -11,8 +11,8 @@ edition = "2021"
 
 [dependencies]
 async-trait = "0.1.77"
-headers = "0.3.8"
-http = "^0.2.0"
+headers = "0.4.0"
+http = "^1.0.0"
 jsonwebtoken = "9.2.0"
 pin-project = "1.1.5"
 serde = { version = "1.0.197", features = ["derive"] }
@@ -20,8 +20,8 @@ tower = { version = "0.4.13", default-features = false }
 tracing = "0.1.40"
 
 [dev-dependencies]
-axum = "0.6.13"
+axum = "0.7.0"
 chrono = { version = "0.4.23", features = ["clock", "serde"] }
-hyper = "^0.14.0"
+http-body-util = "0.1.1"
 tokio = { version = "1.36.0", features = ["macros", "rt-multi-thread"] }
 ring = "0.17.8"

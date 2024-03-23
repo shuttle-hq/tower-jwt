@@ -126,7 +126,7 @@ where
     DecKeyFn: DecodingKeyFn + 'static,
     TService: Service<Request<ReqBody>, Response = Response<ResBody>>,
     ResBody: Default,
-    for<'de> Claim: Deserialize<'de> + Send + Sync + 'static,
+    for<'de> Claim: Deserialize<'de> + Send + Sync + Clone + 'static,
 {
     type Output = Result<TService::Response, TService::Error>;
 
@@ -204,7 +204,7 @@ where
     ResBody: Default,
     F: DecodingKeyFn + 'static,
     <F as DecodingKeyFn>::Error: 'static,
-    for<'de> Claim: Deserialize<'de> + Send + Sync + 'static,
+    for<'de> Claim: Deserialize<'de> + Send + Sync + Clone + 'static,
 {
     type Response = S::Response;
     type Error = S::Error;
@@ -306,7 +306,7 @@ where
 mod tests {
     use axum::{routing::get, Extension, Router};
     use chrono::{Duration, Utc};
-    use hyper::{body, Body};
+    use http_body_util::{BodyExt, Empty};
     use jsonwebtoken::{encode, EncodingKey, Header};
     use ring::{
         rand,
@@ -402,7 +402,12 @@ mod tests {
         //////////////////////////////////////////////////////////////////////////
         let response = router
             .clone()
-            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .oneshot(
+                http::Request::builder()
+                    .uri("/")
+                    .body(Empty::new())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -415,10 +420,10 @@ mod tests {
         let response = router
             .clone()
             .oneshot(
-                Request::builder()
+                http::Request::builder()
                     .uri("/")
                     .header("authorization", token.clone())
-                    .body(Body::empty())
+                    .body(Empty::new())
                     .unwrap(),
             )
             .await
@@ -432,10 +437,10 @@ mod tests {
         let response = router
             .clone()
             .oneshot(
-                Request::builder()
+                http::Request::builder()
                     .uri("/")
                     .header("authorization", format!("Bearer {token}"))
-                    .body(Body::empty())
+                    .body(Empty::new())
                     .unwrap(),
             )
             .await
@@ -449,17 +454,17 @@ mod tests {
         let response = router
             .clone()
             .oneshot(
-                Request::builder()
+                http::Request::builder()
                     .uri("/")
                     .header("Authorization", format!("Bearer   {token}   "))
-                    .body(Body::empty())
+                    .body(Empty::new())
                     .unwrap(),
             )
             .await
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = body::to_bytes(response.into_body()).await.unwrap();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
 
         assert_eq!(&body[..], b"Hello, ferries");
     }
