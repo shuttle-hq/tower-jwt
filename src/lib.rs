@@ -11,60 +11,69 @@ use serde::Deserialize;
 use tower::{Layer, Service};
 use tracing::{error, trace};
 
-/// Trait to get a public key asynchronously
+/// Trait to get a decoding key asynchronously
 #[async_trait]
-pub trait PublicKeyFn: Send + Sync + Clone {
+pub trait DecodingKeyFn: Send + Sync + Clone {
     type Error: std::error::Error + Send;
 
-    async fn public_key(&self) -> Result<Vec<u8>, Self::Error>;
+    async fn decoding_key(&self) -> Result<DecodingKey, Self::Error>;
 }
 
 #[async_trait]
-impl<F, O> PublicKeyFn for F
+impl<F, O> DecodingKeyFn for F
 where
     F: Fn() -> O + Sync + Send + Clone,
-    O: Future<Output = Vec<u8>> + Send,
+    O: Future<Output = DecodingKey> + Send,
 {
     type Error = Infallible;
 
-    async fn public_key(&self) -> Result<Vec<u8>, Self::Error> {
+    async fn decoding_key(&self) -> Result<DecodingKey, Self::Error> {
         Ok((self)().await)
     }
 }
 
-/// Layer to validate JWT tokens with a public key. Valid claims are added to the request extension
+#[async_trait]
+impl DecodingKeyFn for DecodingKey {
+    type Error = Infallible;
+
+    async fn decoding_key(&self) -> Result<DecodingKey, Self::Error> {
+        Ok(self.clone())
+    }
+}
+
+/// Layer to validate JWT tokens with a decoding key. Valid claims are added to the request extension
 ///
 /// It can also be used with tonic. See:
 /// https://github.com/hyperium/tonic/blob/master/examples/src/tower/server.rs
 #[derive(Clone)]
-pub struct JwtLayer<Claim, F> {
-    /// User provided function to get the public key from
-    public_key_fn: F,
-    /// A valid issuer for the token
-    issuer: String,
+pub struct JwtLayer<Claim, F = DecodingKey> {
+    /// User provided function to get the decoding key from
+    decoding_key_fn: F,
+    /// The validation to apply when parsing the token
+    validation: Validation,
     _phantom: PhantomData<Claim>,
 }
 
-impl<Claim, F: PublicKeyFn> JwtLayer<Claim, F> {
-    /// Create a new layer to validate JWT tokens with the given public key
-    /// Tokens will only be accepted if the issuer matches the given issuer
-    pub fn new(issuer: &str, public_key_fn: F) -> Self {
+impl<Claim, F: DecodingKeyFn> JwtLayer<Claim, F> {
+    /// Create a new layer to validate JWT tokens with the given decoding key
+    /// Tokens will only be accepted if they pass the validation
+    pub fn new(validation: Validation, decoding_key_fn: F) -> Self {
         Self {
-            public_key_fn,
-            issuer: issuer.to_string(),
+            decoding_key_fn,
+            validation,
             _phantom: PhantomData,
         }
     }
 }
 
-impl<S, Claim, F: PublicKeyFn> Layer<S> for JwtLayer<Claim, F> {
+impl<S, Claim, F: DecodingKeyFn> Layer<S> for JwtLayer<Claim, F> {
     type Service = Jwt<S, Claim, F>;
 
     fn layer(&self, inner: S) -> Self::Service {
         Jwt {
             inner,
-            public_key_fn: self.public_key_fn.clone(),
-            issuer: self.issuer.clone(),
+            decoding_key_fn: self.decoding_key_fn.clone(),
+            validation: Box::new(self.validation.clone()),
             _phantom: self._phantom,
         }
     }
@@ -74,8 +83,9 @@ impl<S, Claim, F: PublicKeyFn> Layer<S> for JwtLayer<Claim, F> {
 #[derive(Clone)]
 pub struct Jwt<S, Claim, F> {
     inner: S,
-    public_key_fn: F,
-    issuer: String,
+    decoding_key_fn: F,
+    // Using a Box here to reduce cloning it the whole time
+    validation: Box<Validation>,
     _phantom: PhantomData<Claim>,
 }
 
@@ -83,7 +93,7 @@ type AsyncTraitFuture<A> = Pin<Box<dyn Future<Output = A> + Send>>;
 
 #[pin_project(project = JwtFutureProj, project_replace = JwtFutureProjOwn)]
 pub enum JwtFuture<
-    PubKeyFn: PublicKeyFn,
+    DecKeyFn: DecodingKeyFn,
     TService: Service<Request<ReqBody>, Response = Response<ResBody>>,
     ReqBody,
     ResBody,
@@ -99,21 +109,21 @@ pub enum JwtFuture<
     },
 
     // We have a token and need to run our logic.
-    HasTokenWaitingForPublicKey {
+    HasTokenWaitingForDecodingKey {
         bearer: Authorization<Bearer>,
         request: Request<ReqBody>,
         #[pin]
-        public_key_future: AsyncTraitFuture<Result<Vec<u8>, PubKeyFn::Error>>,
-        issuer: String,
+        decoding_key_future: AsyncTraitFuture<Result<DecodingKey, DecKeyFn::Error>>,
+        validation: Box<Validation>,
         service: TService,
         _phantom: PhantomData<Claim>,
     },
 }
 
-impl<PubKeyFn, TService, ReqBody, ResBody, Claim> Future
-    for JwtFuture<PubKeyFn, TService, ReqBody, ResBody, Claim>
+impl<DecKeyFn, TService, ReqBody, ResBody, Claim> Future
+    for JwtFuture<DecKeyFn, TService, ReqBody, ResBody, Claim>
 where
-    PubKeyFn: PublicKeyFn + 'static,
+    DecKeyFn: DecodingKeyFn + 'static,
     TService: Service<Request<ReqBody>, Response = Response<ResBody>>,
     ResBody: Default,
     for<'de> Claim: Deserialize<'de> + Send + Sync + 'static,
@@ -130,47 +140,46 @@ where
                 Poll::Ready(Ok(response))
             }
             JwtFutureProj::WaitForFuture { future } => future.poll(cx),
-            JwtFutureProj::HasTokenWaitingForPublicKey {
+            JwtFutureProj::HasTokenWaitingForDecodingKey {
                 bearer,
-                public_key_future,
-                issuer,
+                decoding_key_future,
+                validation,
                 ..
-            } => {
-                match public_key_future.poll(cx) {
-                    Poll::Pending => Poll::Pending,
-                    Poll::Ready(Err(error)) => {
-                        error!(
-                            error = &error as &dyn std::error::Error,
-                            "failed to get public key from auth service"
-                        );
-                        let response = Response::builder()
-                            .status(StatusCode::SERVICE_UNAVAILABLE)
-                            .body(Default::default())
-                            .unwrap();
+            } => match decoding_key_future.poll(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(Err(error)) => {
+                    error!(
+                        error = &error as &dyn std::error::Error,
+                        "failed to get decoding key"
+                    );
+                    let response = Response::builder()
+                        .status(StatusCode::SERVICE_UNAVAILABLE)
+                        .body(Default::default())
+                        .unwrap();
 
-                        Poll::Ready(Ok(response))
-                    }
-                    Poll::Ready(Ok(public_key)) => {
-                        let claim_result = RequestClaim::<Claim>::from_token(
-                            bearer.token().trim(),
-                            issuer,
-                            &public_key,
-                        );
-                        match claim_result {
-                            Err(code) => {
-                                error!(code = %code, "failed to decode JWT");
+                    Poll::Ready(Ok(response))
+                }
+                Poll::Ready(Ok(decoding_key)) => {
+                    let claim_result = RequestClaim::<Claim>::from_token(
+                        bearer.token().trim(),
+                        &decoding_key,
+                        validation,
+                    );
+                    match claim_result {
+                        Err(code) => {
+                            error!(code = %code, "failed to decode JWT");
 
-                                let response = Response::builder()
-                                    .status(code)
-                                    .body(Default::default())
-                                    .unwrap();
+                            let response = Response::builder()
+                                .status(code)
+                                .body(Default::default())
+                                .unwrap();
 
-                                Poll::Ready(Ok(response))
-                            }
-                            Ok(claim) => {
-                                let owned = self.as_mut().project_replace(JwtFuture::Error);
-                                match owned {
-                                    JwtFutureProjOwn::HasTokenWaitingForPublicKey {
+                            Poll::Ready(Ok(response))
+                        }
+                        Ok(claim) => {
+                            let owned = self.as_mut().project_replace(JwtFuture::Error);
+                            match owned {
+                                    JwtFutureProjOwn::HasTokenWaitingForDecodingKey {
                                         mut request, mut service, ..
                                     } => {
                                         request.extensions_mut().insert(claim);
@@ -178,13 +187,12 @@ where
                                         self.as_mut().set(JwtFuture::WaitForFuture { future });
                                         self.poll(cx)
                                     },
-                                    _ => unreachable!("We know that we're in the 'HasTokenWaitingForPublicKey' state"),
+                                    _ => unreachable!("We know that we're in the 'HasTokenWaitingForDecodingKey' state"),
                                 }
-                            }
                         }
                     }
                 }
-            }
+            },
         }
     }
 }
@@ -194,8 +202,8 @@ where
     S: Service<Request<ReqBody>, Response = Response<ResBody>> + Send + Clone + 'static,
     S::Future: Send + 'static,
     ResBody: Default,
-    F: PublicKeyFn + 'static,
-    <F as PublicKeyFn>::Error: 'static,
+    F: DecodingKeyFn + 'static,
+    <F as DecodingKeyFn>::Error: 'static,
     for<'de> Claim: Deserialize<'de> + Send + Sync + 'static,
 {
     type Response = S::Response;
@@ -212,13 +220,14 @@ where
     fn call(&mut self, req: Request<ReqBody>) -> Self::Future {
         match req.headers().typed_try_get::<Authorization<Bearer>>() {
             Ok(Some(bearer)) => {
-                let public_key_fn = self.public_key_fn.clone();
-                let public_key_future = Box::pin(async move { public_key_fn.public_key().await });
-                Self::Future::HasTokenWaitingForPublicKey {
+                let decoding_key_fn = self.decoding_key_fn.clone();
+                let decoding_key_future =
+                    Box::pin(async move { decoding_key_fn.decoding_key().await });
+                Self::Future::HasTokenWaitingForDecodingKey {
                     bearer,
                     request: req,
-                    public_key_future,
-                    issuer: self.issuer.clone(),
+                    decoding_key_future,
+                    validation: self.validation.clone(),
                     service: self.inner.clone(),
                     _phantom: self._phantom,
                 }
@@ -250,13 +259,13 @@ impl<T> RequestClaim<T>
 where
     for<'de> T: Deserialize<'de>,
 {
-    pub fn from_token(token: &str, issuer: &str, public_key: &[u8]) -> Result<Self, StatusCode> {
-        let decoding_key = DecodingKey::from_ed_der(public_key);
-        let mut validation = Validation::new(jsonwebtoken::Algorithm::EdDSA);
-        validation.set_issuer(&[issuer]);
-
+    pub fn from_token(
+        token: &str,
+        decoding_key: &DecodingKey,
+        validation: &Validation,
+    ) -> Result<Self, StatusCode> {
         trace!("converting token to claim");
-        let claim: T = decode(token, &decoding_key, &validation)
+        let claim: T = decode(token, decoding_key, validation)
             .map_err(|err| {
                 error!(
                     error = &err as &dyn std::error::Error,
@@ -321,8 +330,6 @@ mod tests {
         nbf: usize,
         /// Subject (whom token refers to).
         pub sub: String,
-        /// The original token that was parsed
-        pub token: Option<String>,
     }
 
     impl Claim {
@@ -337,35 +344,26 @@ mod tests {
                 iss: "test-issuer".to_string(),
                 nbf: iat.timestamp() as usize,
                 sub,
-                token: None,
             }
         }
 
         pub fn into_token(self, encoding_key: &EncodingKey) -> Result<String, StatusCode> {
-            if let Some(token) = self.token {
-                Ok(token)
-            } else {
-                encode(
-                    &Header::new(jsonwebtoken::Algorithm::EdDSA),
-                    &self,
-                    encoding_key,
-                )
-                .map_err(|err| {
-                    error!(
-                        error = &err as &dyn std::error::Error,
-                        "failed to convert claim to token"
-                    );
-                    match err.kind() {
-                        jsonwebtoken::errors::ErrorKind::Json(_) => {
-                            StatusCode::INTERNAL_SERVER_ERROR
-                        }
-                        jsonwebtoken::errors::ErrorKind::Crypto(_) => {
-                            StatusCode::SERVICE_UNAVAILABLE
-                        }
-                        _ => StatusCode::INTERNAL_SERVER_ERROR,
-                    }
-                })
-            }
+            encode(
+                &Header::new(jsonwebtoken::Algorithm::EdDSA),
+                &self,
+                encoding_key,
+            )
+            .map_err(|err| {
+                error!(
+                    error = &err as &dyn std::error::Error,
+                    "failed to convert claim to token"
+                );
+                match err.kind() {
+                    jsonwebtoken::errors::ErrorKind::Json(_) => StatusCode::INTERNAL_SERVER_ERROR,
+                    jsonwebtoken::errors::ErrorKind::Crypto(_) => StatusCode::SERVICE_UNAVAILABLE,
+                    _ => StatusCode::INTERNAL_SERVER_ERROR,
+                }
+            })
         }
     }
 
@@ -377,6 +375,10 @@ mod tests {
         let encoding_key = EncodingKey::from_ed_der(doc.as_ref());
         let pair = Ed25519KeyPair::from_pkcs8(doc.as_ref()).unwrap();
         let public_key = pair.public_key().as_ref().to_vec();
+        let decoding_key = DecodingKey::from_ed_der(&public_key);
+
+        let mut validation = Validation::new(jsonwebtoken::Algorithm::EdDSA);
+        validation.set_issuer(&["test-issuer"]);
 
         let router = Router::new()
             .route(
@@ -389,9 +391,10 @@ mod tests {
                     }
                 }),
             )
-            .layer(JwtLayer::<Claim, _>::new("test-issuer", move || {
-                let public_key = public_key.clone();
-                async move { public_key.clone() }
+            .layer(JwtLayer::<Claim, _>::new(validation, move || {
+                let decoding_key = decoding_key.clone();
+
+                async { decoding_key }
             }));
 
         //////////////////////////////////////////////////////////////////////////
