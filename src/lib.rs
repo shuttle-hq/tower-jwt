@@ -32,12 +32,21 @@ where
     }
 }
 
+#[async_trait]
+impl DecodingKeyFn for DecodingKey {
+    type Error = Infallible;
+
+    async fn decoding_key(&self) -> Result<DecodingKey, Self::Error> {
+        Ok(self.clone())
+    }
+}
+
 /// Layer to validate JWT tokens with a decoding key. Valid claims are added to the request extension
 ///
 /// It can also be used with tonic. See:
 /// https://github.com/hyperium/tonic/blob/master/examples/src/tower/server.rs
 #[derive(Clone)]
-pub struct JwtLayer<Claim, F> {
+pub struct JwtLayer<Claim, F = DecodingKey> {
     /// User provided function to get the decoding key from
     decoding_key_fn: F,
     /// The validation to apply when parsing the token
@@ -366,6 +375,7 @@ mod tests {
         let encoding_key = EncodingKey::from_ed_der(doc.as_ref());
         let pair = Ed25519KeyPair::from_pkcs8(doc.as_ref()).unwrap();
         let public_key = pair.public_key().as_ref().to_vec();
+        let decoding_key = DecodingKey::from_ed_der(&public_key);
 
         let mut validation = Validation::new(jsonwebtoken::Algorithm::EdDSA);
         validation.set_issuer(&["test-issuer"]);
@@ -382,9 +392,9 @@ mod tests {
                 }),
             )
             .layer(JwtLayer::<Claim, _>::new(validation, move || {
-                let decoding_key = DecodingKey::from_ed_der(&public_key);
+                let decoding_key = decoding_key.clone();
 
-                async move { decoding_key }
+                async { decoding_key }
             }));
 
         //////////////////////////////////////////////////////////////////////////
