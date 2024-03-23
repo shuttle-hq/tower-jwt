@@ -8,6 +8,7 @@ Since this is a Tower middleware it can be used on any framework like Axum, Toni
 ``` rust
 use http::{Request, Response, StatusCode};
 use hyper::Body;
+use jsonwebtoken::DecodingKey;
 use serde::Deserialize;
 use std::{convert::Infallible, iter::once};
 use tower::{Service, ServiceBuilder, ServiceExt};
@@ -40,7 +41,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Make a new JWT layer which will validate the token were issued by "issuer"
     let jwt_layer = JwtLayer::<Claim, _>::new("issuer", || {
         // Something to get the public key
-        async { Vec::new() }
+        let public_key = Vec::new();
+        let decoding_key = DecodingKey::from_ed_der(&public_key);
+
+        async { decoding_key }
     });
 
     let mut service = ServiceBuilder::new().layer(jwt_layer).service_fn(handle);
