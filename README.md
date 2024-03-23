@@ -1,6 +1,8 @@
 Tower middleware to parse JWT tokens off the Authorization Bearer of requests and store the deserialized claims on the
 request extension.
 
+This is build on top of the [jsonwebtoken](https://docs.rs/jsonwebtoken) crate and support all the algorithms supported by that crate.
+
 Since this is a Tower middleware it can be used on any framework like Axum, Tonic, etc.
 
 # Example
@@ -8,7 +10,7 @@ Since this is a Tower middleware it can be used on any framework like Axum, Toni
 ``` rust
 use http::{Request, Response, StatusCode};
 use hyper::Body;
-use jsonwebtoken::DecodingKey;
+use jsonwebtoken::{DecodingKey, Validation};
 use serde::Deserialize;
 use std::{convert::Infallible, iter::once};
 use tower::{Service, ServiceBuilder, ServiceExt};
@@ -16,7 +18,7 @@ use tower_jwt::{JwtLayer, RequestClaim};
 
 #[derive(Clone, Deserialize, Debug)]
 struct Claim {
-    /// Subject (whom token refers to).
+    /// Subject (whom the token refers to).
     pub sub: String,
 }
 
@@ -38,11 +40,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Make a new JWT layer which will validate the token were issued by "issuer"
-    let jwt_layer = JwtLayer::<Claim, _>::new("issuer", || {
-        // Something to get the public key
-        let public_key = Vec::new();
-        let decoding_key = DecodingKey::from_ed_der(&public_key);
+    // Make a new JWT layer which will validate the tokens on requests
+    let jwt_layer = JwtLayer::<Claim, _>::new(Validation::default(), || {
+        let decoding_key = DecodingKey::from_secret("symmetric secret".as_bytes());
 
         async { decoding_key }
     });

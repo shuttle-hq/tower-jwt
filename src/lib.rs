@@ -40,18 +40,18 @@ where
 pub struct JwtLayer<Claim, F> {
     /// User provided function to get the decoding key from
     decoding_key_fn: F,
-    /// A valid issuer for the token
-    issuer: String,
+    /// The validation to apply when parsing the token
+    validation: Validation,
     _phantom: PhantomData<Claim>,
 }
 
 impl<Claim, F: DecodingKeyFn> JwtLayer<Claim, F> {
     /// Create a new layer to validate JWT tokens with the given decoding key
-    /// Tokens will only be accepted if the issuer matches the given issuer
-    pub fn new(issuer: &str, decoding_key_fn: F) -> Self {
+    /// Tokens will only be accepted if they pass the validation
+    pub fn new(validation: Validation, decoding_key_fn: F) -> Self {
         Self {
             decoding_key_fn,
-            issuer: issuer.to_string(),
+            validation,
             _phantom: PhantomData,
         }
     }
@@ -64,7 +64,7 @@ impl<S, Claim, F: DecodingKeyFn> Layer<S> for JwtLayer<Claim, F> {
         Jwt {
             inner,
             decoding_key_fn: self.decoding_key_fn.clone(),
-            issuer: self.issuer.clone(),
+            validation: Box::new(self.validation.clone()),
             _phantom: self._phantom,
         }
     }
@@ -75,7 +75,8 @@ impl<S, Claim, F: DecodingKeyFn> Layer<S> for JwtLayer<Claim, F> {
 pub struct Jwt<S, Claim, F> {
     inner: S,
     decoding_key_fn: F,
-    issuer: String,
+    // Using a Box here to reduce cloning it the whole time
+    validation: Box<Validation>,
     _phantom: PhantomData<Claim>,
 }
 
@@ -104,7 +105,7 @@ pub enum JwtFuture<
         request: Request<ReqBody>,
         #[pin]
         decoding_key_future: AsyncTraitFuture<Result<DecodingKey, DecKeyFn::Error>>,
-        issuer: String,
+        validation: Box<Validation>,
         service: TService,
         _phantom: PhantomData<Claim>,
     },
@@ -133,7 +134,7 @@ where
             JwtFutureProj::HasTokenWaitingForDecodingKey {
                 bearer,
                 decoding_key_future,
-                issuer,
+                validation,
                 ..
             } => match decoding_key_future.poll(cx) {
                 Poll::Pending => Poll::Pending,
@@ -152,8 +153,8 @@ where
                 Poll::Ready(Ok(decoding_key)) => {
                     let claim_result = RequestClaim::<Claim>::from_token(
                         bearer.token().trim(),
-                        issuer,
                         &decoding_key,
+                        validation,
                     );
                     match claim_result {
                         Err(code) => {
@@ -217,7 +218,7 @@ where
                     bearer,
                     request: req,
                     decoding_key_future,
-                    issuer: self.issuer.clone(),
+                    validation: self.validation.clone(),
                     service: self.inner.clone(),
                     _phantom: self._phantom,
                 }
@@ -251,14 +252,11 @@ where
 {
     pub fn from_token(
         token: &str,
-        issuer: &str,
         decoding_key: &DecodingKey,
+        validation: &Validation,
     ) -> Result<Self, StatusCode> {
-        let mut validation = Validation::new(jsonwebtoken::Algorithm::EdDSA);
-        validation.set_issuer(&[issuer]);
-
         trace!("converting token to claim");
-        let claim: T = decode(token, decoding_key, &validation)
+        let claim: T = decode(token, decoding_key, validation)
             .map_err(|err| {
                 error!(
                     error = &err as &dyn std::error::Error,
@@ -369,6 +367,9 @@ mod tests {
         let pair = Ed25519KeyPair::from_pkcs8(doc.as_ref()).unwrap();
         let public_key = pair.public_key().as_ref().to_vec();
 
+        let mut validation = Validation::new(jsonwebtoken::Algorithm::EdDSA);
+        validation.set_issuer(&["test-issuer"]);
+
         let router = Router::new()
             .route(
                 "/",
@@ -380,7 +381,7 @@ mod tests {
                     }
                 }),
             )
-            .layer(JwtLayer::<Claim, _>::new("test-issuer", move || {
+            .layer(JwtLayer::<Claim, _>::new(validation, move || {
                 let decoding_key = DecodingKey::from_ed_der(&public_key);
 
                 async move { decoding_key }
