@@ -6,16 +6,16 @@ This is build on top of the [jsonwebtoken](https://docs.rs/jsonwebtoken) crate a
 Since this is a Tower middleware it can be used on any framework like Axum, Tonic, etc.
 
 # Symmetric example using Hyper
+This example show how to use the re-exported `DecodingKey` and `Validation` from `jsonwebtoken` to parse and validate a JWT setup with a simple symmetric secret. It also show how to customize the default validator and how to extract both registered and public fields on a claim.
 
 ``` rust
 use chrono::{DateTime, Utc};
 use http::{header::AUTHORIZATION, Request, Response, StatusCode};
 use http_body_util::Empty;
-use jsonwebtoken::{DecodingKey, Validation};
 use serde::Deserialize;
 use std::convert::Infallible;
 use tower::{Service, ServiceBuilder, ServiceExt};
-use tower_jwt::{JwtLayer, RequestClaim};
+use tower_jwt::{DecodingKey, JwtLayer, RequestClaim, Validation};
 
 // Setup your claim with the fields you want to extract
 #[derive(Clone, Deserialize, Debug)]
@@ -101,14 +101,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 use axum::{routing::get, Extension, Router};
 use http::{Request, StatusCode};
 use http_body_util::Empty;
-use jsonwebtoken::{DecodingKey, Validation};
 use ring::{
     rand,
     signature::{self, Ed25519KeyPair, KeyPair},
 };
 use serde::Deserialize;
 use tower::ServiceExt;
-use tower_jwt::{JwtLayer, RequestClaim};
+use tower_jwt::{DecodingKey, JwtLayer, RequestClaim, Validation};
 
 // Setup your claim with the fields you want to extract
 #[derive(Deserialize, Clone)]
