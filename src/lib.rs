@@ -5,7 +5,8 @@ use std::{convert::Infallible, future::Future, marker::PhantomData, pin::Pin, ta
 use async_trait::async_trait;
 use headers::{authorization::Bearer, Authorization, HeaderMapExt};
 use http::{Request, Response, StatusCode};
-use jsonwebtoken::{decode, DecodingKey, Validation};
+use jsonwebtoken::decode;
+pub use jsonwebtoken::{DecodingKey, Validation};
 use pin_project::pin_project;
 use serde::Deserialize;
 use tower::{Layer, Service};
